@@ -1,0 +1,338 @@
+tunnels <- read.csv("pitch tunnels pairs.csv")
+
+padres <- read.csv("Padres Tunnels.csv")
+
+library(data.table)
+library(ggplot2)
+
+colnames(padres)[6] <- "NAME"
+tun <- merge.data.frame(padres, tunnels, by = c("NAME"))
+###################
+
+#League Tunnel data
+league <- read.csv("League Tunnels.csv")
+pitch <- read.csv("p tunnels l.csv")
+colnames(pitch)[3] <- "NAME"
+
+df <- merge.data.frame(pitch, league, by="NAME", all=T )
+str(df)
+
+summary(lm(woba ~ launch_angle + launch_speed + spin_rate + PlateDist +
+             FTimeDiff, data=df))
+
+summary(lm(ba ~ launch_angle + launch_speed + velocity + spin_rate, data=df ))
+
+ggplot(df, aes(PreMax, launch_speed)) + geom_point() + xlim(1.2,2) + geom_smooth(method = 'lm')
+summary(lm(woba ~ launch_speed, data=df))
+
+perdomo <- subset(padres, NAME=="Luis Perdomo")
+
+library(caret)
+set.seed(42)
+str(perdomo$description)
+
+perdomo$release_pos_z <- as.numeric(as.character(perdomo$release_pos_z))
+perdomo$plate_z <- as.numeric(as.character(perdomo$plate_z))
+perdomo$tun_z <- perdomo$plate_z - perdomo$release_pos_z 
+perdomo$plate_x <- as.numeric(as.character(perdomo$plate_x))
+perdomo$release_pos_x <- as.numeric(as.character(perdomo$release_pos_x))
+perdomo$tun_x <- perdomo$plate_x - perdomo$release_pos_x
+
+perdomo.1 <- subset(perdomo, description =="swinging_strike" | description=="ball" |
+                      description=="called_strike")
+
+#Training control set for regressions
+h.fold.1 <- createFolds(perdomo.1$description, k = 5)
+
+h.control.1 <- trainControl(
+  classProbs = TRUE, 
+  verboseIter = TRUE,
+  savePredictions = TRUE,
+  index = h.fold.1
+)
+
+str(perdomo)
+perdomo$ax <- as.numeric(as.character(perdomo$ax))
+perdomo.1$description <- droplevels(perdomo.1$description)
+class(perdomo$description)
+
+class(perdomo.1$effective_speed)
+perdomo.1$effective_speed <- as.numeric(as.character(perdomo.1$effective_speed))
+
+#GLM probit model
+model_glmnet.1 <- train(
+  description ~ zone + release_spin_rate + pitch_type + release_speed +
+    tun_x + tun_z, perdomo.1,
+  metric = "ROC",
+  method = "glmnet",
+  tuneGrid = expand.grid(
+    alpha = 0:1,
+    lambda = 0:10/10
+  ),
+  trControl = h.control.1
+)
+
+summary(model_glmnet)
+plot(model_glmnet.1)
+plot(model_glmnet$finalModel)
+
+
+summary(lm(iso_value ~ zone + pitch_type + release_speed + release_spin_rate, data=perdomo))
+
+#Random Forest Model
+model_rf.1 <- train(description ~ zone + release_spin_rate + pitch_type + release_speed +
+                      tun_x + tun_z, 
+                    perdomo.1, metric = "ROC", 
+                    method = "ranger", trControl = h.control.1)
+
+plot(model_rf.1)
+
+model_list <- list(glmnet = model_glmnet.1, rf = model_rf.1)
+resamps <- resamples(model_list)
+summary(resamps)
+densityplot(resamps)
+
+#probit model is better. 
+
+library(dplyr)
+
+#Probit Confusion Matrix
+model_confusmat <- confusionMatrix(model_glmnet.1)
+model_confusmat
+
+perdomo.1$p <- predict(model_glmnet.1, type = "prob")
+
+perdomo.1$ssprob <- perdomo.1$p$swinging_strike
+
+take_r <- subset(perdomo.1, stand == "R")
+take_l <- subset(perdomo.1, stand == "L")
+
+zone.r <- round(tapply(take_r$ssprob, take_r$zone, mean), 3)
+zone.r
+zone.l <- round(tapply(take_l$ssprob, take_l$zone, mean), 3)
+zone.l
+print(max(zone.l))
+library(broom)
+
+rhb.zone.pitch <- tidy(with(perdomo.1, tapply(take_r$ssprob, list(take_r$zone, take_r$pitch_type), mean)))
+rhb.zone.pitch
+write.table(rhb.zone.pitch, file = "olstab.txt", sep = ",", quote = FALSE, row.names = T)
+
+
+perdomo.1$csprob <- perdomo.1$p$called_strike
+perdomo.1$bprob <- perdomo.1$p$ball
+
+#K zone Dimensions
+topKzone <- 3.5
+botKzone <- 1.6
+inKzone <- -0.95
+outKzone <- 0.95
+kZone <- data.frame(
+  x=c(inKzone, inKzone, outKzone, outKzone, inKzone),
+  y=c(botKzone, topKzone, topKzone, botKzone, botKzone)
+)
+
+perdomo.1$xx <- kZone$x
+
+class(perdomo.1$ssprob)
+plot.ss <- ggplot(kZone, aes(x,y)) + 
+  geom_point(data=perdomo.1, aes(x=plate_x, y=plate_z, color = ssprob)) + geom_path(lwd = 1.5) +
+  scale_colour_gradient(low = "blue"
+                        , high = "red") + theme_classic() +
+  labs(x = "Horizontal Location (Catcher's View)", y = "Vertical Location") +
+  scale_y_continuous(limits = c(-0.5,4.5)) + ggtitle("Predicted Swinging Strike Probability by Location")
+plot.ss
+
+ssprob <- perdomo.1$ssprob
+perdomo.1$SSprobability <- exp(perdomo.1$ssprob) / (1 + exp(perdomo.1$ssprob))
+
+plot.ss.density <- ggplot(kZone, aes(x,y)) +
+  geom_density_2d(data=perdomo.1, aes(x=plate_x, y=plate_z)) + geom_path(lwd = 1.5) + 
+  labs(x = "Horizontal Location (Catcher's View)", y = "Vertical Location", legend = "Swinging S.")  + ggtitle("Perdomo Pitch Density Plot") + scale_y_continuous(limits = c(-0.5,4.5)) +
+  coord_fixed() + scale_x_continuous(limits = c(-2,2)) +
+  stat_density2d(data= perdomo.1, aes(x= plate_x, y=plate_z, alpha=..level..), geom="polygon") +
+  scale_alpha_continuous(limits=c(0,0.2),breaks=seq(0,0.2,by=0.025))+
+  geom_point(colour="red",alpha=0.02)+
+  theme_bw()
+
+ggplot(perdomo.1, aes(plate_x, plate_z, fill=ssprob)) + 
+
+plot.ss.density
+
+class(perdomo.1$ssprob)
+
+library(pROC)
+
+#ROC and general model perdomance indications
+ROC.ssprob <- roc(perdomo.1$description, perdomo.1$ssprob )
+ROC.bprob <- roc(perdomo.1$description, perdomo.1$bprob)
+ROC.csprob <- roc(perdomo.1$description, perdomo.1$csprob)
+plot(ROC, col = "red")
+plot(ROC.bprob, col = 'red')
+plot(ROC.csprob, col = 'red')
+
+auc_ssprob <- auc(ROC.ssprob)
+auc_ssprob
+auc_bprob <- auc(ROC.bprob)
+auc_bprob 
+auc_csprob <- auc(ROC.csprob)
+auc_csprob
+
+
+plot.bprob <- ggplot(kZone, aes(x,y)) + 
+  geom_point(data=perdomo.1, aes(plate_x, plate_z, color = bprob)) + geom_path(lwd = 1.5) +
+  scale_colour_gradient(low = "blue"
+                        , high = "red") + theme_classic() +
+  labs(x = "Horizontal Location (Catcher's View)", y = "Vertical Location") +
+  scale_fill_discrete(name="Ball Prob.")
+
+plot.bprob
+
+plot.bprob.desnity <- ggplot(kZone, aes(x,y)) + 
+  geom_density_2d(data=perdomo.1, aes(plate_x, plate_z, color = bprob)) + geom_path(lwd = 1.5) +
+  scale_colour_gradient(low = "blue"
+                        , high = "red") + theme_classic() +
+  labs(x = "Horizontal Location (Catcher's View)", y = "Vertical Location") +
+  scale_fill_discrete(name="Ball Prob.")
+
+
+class(perdomo$launch_angle)
+perdomo$launch_angle <- as.numeric(as.character(perdomo$launch_angle))
+perdomo.2 <- subset(perdomo, launch_angle > -10000 | launch_angle <10000)
+perdomo.2$gb <- ifelse(perdomo.2$launch_angle < 5, "X1", "X0")
+perdomo.2$gb.1 <- ifelse(perdomo.2$launch_angle < 5, 1, 0)
+mean(perdomo$ssprob)
+
+set.seed(42)
+
+#Attempt to predict batted ball outcomes - no stat. significance found
+h.fold.2 <- createFolds(perdomo.2$gb, k = 5)
+
+h.control.2 <- trainControl(
+  classProbs = TRUE, 
+  verboseIter = TRUE,
+  savePredictions = TRUE,
+  index = h.fold.2
+)
+
+class(perdomo.2$gb)
+
+perdomo.2$gb <- factor(perdomo.2$gb)
+
+model_glmnet.2 <- train(
+  gb ~ plate_x + plate_z + release_spin_rate + pitch_type + release_speed +
+    tun_x + tun_z, perdomo.2,
+  metric = "ROC",
+  method = "glmnet",
+  tuneGrid = expand.grid(
+    alpha = 0:1,
+    lambda = 0:10/10
+  ),
+  trControl = h.control.2
+)
+
+plot(model_glmnet.2)
+
+summary(glm(gb.1 ~ plate_x + plate_z + release_spin_rate + pitch_type + release_speed +
+              tun_x + tun_z, data = perdomo.2, family="binomial"))
+
+require(dplyr)
+require(mgcv)
+
+
+
+fit <- glm(description ~ zone + release_spin_rate + pitch_type + release_speed +
+               tun_x + tun_z, family=binomial, data= perdomo.1)
+
+# find predicted probabilities over a 50 x 50 grid
+x <- seq(-1.5, 1.5, length.out=50)
+y <- seq(0.5, 5, length.out=50)
+data.predict <- data.frame(X = c(outer(x, y * 0 + 1)),
+                           Z = c(outer(x * 0 + 1, y)))
+lp <- predict(fit, data.predict)
+data.predict$Probability <- exp(lp) / (1 + exp(lp))
+
+ss.plot.RHB <- ggplot(data=kZone, aes(x=x,y=y)) +
+  stat_density2d(data=take_r, aes(plate_x, plate_z, color = ssprob, alpha = ..level..), geom = "polygon") +
+                     geom_path(lwd = 1.5) +
+  scale_colour_gradient(low = "blue"
+                        , high = "red") + theme_bw() +
+  labs(x = "Horizontal Location (Catcher's View)", y = "Vertical Location") +
+  scale_y_continuous(limits = c(0,5)) + ggtitle("Swing and Miss Probability by Pitch Type RHB")
+ss.plot.RHB
+
+ss.plot.RHB.density <- ggplot(data=kZone, aes(x=x,y=y)) +
+  stat_density2d(data=take_r, aes(plate_x, plate_z, color = ssprob, alpha = ..level..), geom = "polygon") +
+  geom_path(lwd = 1.5) +
+  scale_colour_gradient(low = "blue"
+                        , high = "red") + theme_bw() +
+  labs(x = "Horizontal Location (Catcher's View)", y = "Vertical Location") +
+  scale_y_continuous(limits = c(0,5)) + ggtitle("Swing and Miss Probability by Pitch Type RHB") +
+  
+
+zone.r
+
+take_r_SL <- subset(take_r, pitch_type == "SL")
+mean(take_r_SL$tun_x)
+
+perdomo.1_si <- subset(perdomo.1, pitch_type == "FT")
+mean(perdomo.1_si$tun_z)
+
+padres.tun.rhb.sl <- subset(padres, pitch_type == "SL")
+class(padres$release_pos_x)
+padres$release_pos_x <- as.numeric(as.character(padres$release_pos_x))
+padres$release_pos_z <- as.numeric(as.character(padres$release_pos_z))
+padres$plate_z <- as.numeric(as.character(padres$plate_z))
+padres$plate_x <- as.numeric(as.character(padres$plate_x))
+
+padres$tun_z <- padres$plate_z - padres$release_pos_z 
+padres$tunx <- padres$plate_x - padres$release_pos_x
+
+class(padres.tun.rhb.sl$tunx)
+
+mean(padres.tun.rhb.sl$tunx)
+mean(padres.tun.rhb.sl$tun_z)
+
+perdomo.tun <- subset(tunnels, NAME == "Luis Perdomo")
+max(perdomo.tun$FTimeDiff)
+
+ggplot(kZone, aes(x,y)) + geom_point(data=take_r, aes(release_pos_x, release_pos_z, color = pitch_type)) +
+  geom_path(lwd = 1.5) + theme_bw() +
+  labs(x = "Horizontal Measure ft. (Catcher's View)", y = "Vertical Location ft.") +
+  ggtitle("Luis Perdomo Release Position vs. RHB")
+
+kluber <- read.csv("Kluber.csv")
+kluber$release_pos_x <- as.numeric(as.character(kluber$release_pos_x))
+kluber$release_pos_z <- as.numeric(as.character(kluber$release_pos_z))
+
+klub.release.points <- ggplot(kZone, aes(x,y)) + geom_point(data=kluber, aes(release_pos_x, 
+                                                release_pos_z, color = pitch_type)) +
+  geom_path(lwd = 1.5) + theme_bw() + scale_x_continuous(limits = c(-3,1)) + 
+  labs(x = "Horizontal Measure ft. (Catcher's View)", y = "Vertical Location ft.") +
+  ggtitle("Corey Kluber Release Positions") + scale_x_continuous(limits = c(-2.5,1))
+
+take_l_sl <- subset(take_l, pitch_type=="SL")
+take_r_sl <- subset(take_r, pitch_type=="SL")
+
+ss.plot.LHB.density <- ggplot(data=kZone, aes(x=x,y=y)) +
+  stat_density2d(data=take_r_sl, aes(plate_x, plate_z, color = ssprob, alpha = ..level..), geom = "polygon") +
+  geom_path(lwd = 1.5) +
+  scale_colour_gradient(low = "blue"
+                        , high = "red") + theme_bw() +
+  labs(x = "Horizontal Location (Catcher's View)", y = "Vertical Location") +
+  scale_y_continuous(limits = c(0,5)) + ggtitle("Slider Pitch Density RHB")
+ss.plot.LHB.density
+
+zone.l
+
+tidy(with(perdomo.1, tapply(take_l$ssprob, list(take_l$zone, take_l$pitch_type), mean)))
+
+#Slider Whiff Plot
+ggplot(kZone, aes(x,y)) + 
+  geom_point(data=perdomo.1_si, aes(x=plate_x, y=plate_z, color = ssprob)) + geom_path(lwd = 1.5) +
+  scale_colour_gradient(low = "blue"
+                        , high = "red") + theme_classic() +
+  labs(x = "Horizontal Location (Catcher's View)", y = "Vertical Location") +
+  scale_y_continuous(limits = c(-0.5,4.5)) + ggtitle("Predicted Swinging Strike Probability by Location")
+
+plot.ss
