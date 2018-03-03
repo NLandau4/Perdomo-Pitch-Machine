@@ -1,0 +1,58 @@
+library(shiny)
+library(ggplot2)
+
+#Machine App beta code. Not fully completed - WIP 
+
+# Define UI for application that plots features of movies
+ui <- fluidPage(
+  
+  # Sidebar layout with a input and output definitions
+  sidebarLayout(
+    
+    # Inputs
+    sidebarPanel(
+      
+      # Select variable for y-axis
+      selectInput(inputId = "y", 
+                  label = "Y-axis:",
+                  choices = c("Vertical Location"  = "plate_z", 
+                              "Launch Angle" = "launch_angle"
+                              ), 
+                  selected = "plate_z"),
+      
+      # Select variable for x-axis
+      selectInput(inputId = "x", 
+                  label = "X-axis:",
+                  choices = c("Horitzontal Location" = "plate_x", 
+                              "Launch Speed" = "launch_speed"), 
+                  selected = "plate_x"),
+      
+      # Select variable for color
+      selectInput(inputId = "z", 
+                  label = "Color by:",
+                  choices = c("Whiff Probability" = "ssprob",
+                              "Ball Probability" = "bprob",
+                              "Called Sprike Probability" = "csprob"),
+                  selected = "ssprob")
+    ),
+    
+    # Outputs
+    mainPanel(
+      plotOutput(outputId = "scatterplot")
+    )
+  )
+)
+
+# Define server function required to create the scatterplot
+server <- function(input, output) {
+  
+  # Create the scatterplot object the plotOutput function is expecting
+  output$scatterplot <- renderPlot({
+    ggplot(data = perdomo.1, aes_string(x = input$x, y = input$y,
+                                     color = input$z))
+      geom_point() + geom_point(kZone, aes(x, y))
+  })
+}
+
+# Create a Shiny app object
+shinyApp(ui = ui, server = server)
